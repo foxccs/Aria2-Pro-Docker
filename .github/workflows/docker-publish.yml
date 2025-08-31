@@ -1,54 +1,85 @@
-name: Docker Images Publish
+name: 构建并推送Docker镜像
 
 on:
-  workflow_dispatch:
-  repository_dispatch:
+  workflow_dispatch:  # 支持手动触发
+  push:
+    branches: [ main ]  # 推送到main分支时自动触发
+    tags: [ 'v*' ]      # 打标签时自动触发（如v1.0.0）
 
 jobs:
-  publish:
+  build-and-push:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15  # 延长超时时间，避免多平台构建中断
 
     steps:
-    - name: Checkout
-      uses: actions/checkout@v4
+      # 步骤1：拉取代码
+      - name: 拉取仓库代码
+        uses: actions/checkout@v4
 
-    - name: Set up QEMU
-      uses: docker/setup-qemu-action@v3
+      # 步骤2：配置QEMU（支持多平台构建）
+      - name: 配置QEMU模拟器
+        uses: docker/setup-qemu-action@v3
 
-    - name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@v3
+      # 步骤3：配置Docker Buildx（增强构建工具）
+      - name: 配置Docker Buildx
+        uses: docker/setup-buildx-action@v3
 
-    - name: Login to DockerHub
-      uses: docker/login-action@v3
-      with:
-        username: ${{ secrets.DOCKERHUB_USERNAME }}  # 确保与 Secret 名称一致
-        password: ${{ secrets.DOCKERHUB_TOKEN }}     # 确保与 Secret 名称一致
+      # 步骤4：调试Secrets（关键！检查凭证是否存在）
+      - name: 验证Secrets是否有效
+        run: |
+          echo "=== 检查DockerHub用户名是否存在 ==="
+          if [ -z "${{ secrets.DOCKERHUB_USERNAME }}" ]; then
+            echo "错误：未找到DOCKERHUB_USERNAME，请检查Secrets配置"
+            exit 1
+          else
+            echo "DOCKERHUB_USERNAME存在 ✅"
+          fi
 
-    - name: Login to GitHub Container Registry
-      uses: docker/login-action@v3
-      with:
-        registry: ghcr.io
-        username: ${{ github.repository_owner }}
-        password: ${{ secrets.CR_PAT }}
+          echo "=== 检查DockerHub令牌是否存在 ==="
+          if [ -z "${{ secrets.DOCKERHUB_TOKEN }}" ]; then
+            echo "错误：未找到DOCKERHUB_TOKEN，请检查Secrets配置"
+            exit 1
+          else
+            echo "DOCKERHUB_TOKEN存在 ✅"
+          fi
 
-    - name: Marker version and time
-      id: getVersion
-      run: |
-        sed -i "s@COMMIT_HASH@$(git rev-parse --short HEAD)@" rootfs/Aria2-Pro
-        sed -i "s@DATE_TIME@$(date +"%Y/%m/%d %H:%M")@" rootfs/Aria2-Pro
-        cat rootfs/Aria2-Pro
-        echo "time=$(date +"%Y%m%d%H%M")" >> $GITHUB_OUTPUT  # 注意：最新 GitHub Actions 推荐用这种输出方式
+      # 步骤5：登录DockerHub（核心认证步骤）
+      - name: 登录DockerHub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}  # 必须与Secrets名称一致
+          password: ${{ secrets.DOCKERHUB_TOKEN }}     # 必须使用访问令牌（非密码）
 
-    - name: Build and push
-      uses: docker/build-push-action@v5
-      with:
-        platforms: linux/amd64,linux/386,linux/arm64,linux/arm/v7,linux/arm/v6
-        file: Dockerfile
-        context: .
-        push: true
-        tags: |
-          p3terx/aria2-pro:latest
-          ghcr.io/p3terx/aria2-pro:latest
-          p3terx/aria2-pro:${{ steps.getVersion.outputs.time }}
-          ghcr.io/p3terx/aria2-pro:${{ steps.getVersion.outputs.time }}
+      # 步骤6：登录GitHub容器仓库（可选，如需推送到GHCR）
+      - name: 登录GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}  # GitHub自动生成的令牌，无需手动配置
+
+      # 步骤7：生成版本标签（基于时间戳）
+      - name: 生成镜像标签
+        id: generate-tags
+        run: |
+          # 基础标签（替换为你的DockerHub用户名，如foxcc/aria2-pro）
+          BASE_IMAGE="${{ secrets.DOCKERHUB_USERNAME }}/aria2-pro"
+          # 时间戳标签（如202405201530）
+          TIMESTAMP=$(date +"%Y%m%d%H%M")
+          
+          # 输出标签列表（支持latest和时间戳）
+          echo "tags=${BASE_IMAGE}:latest,${BASE_IMAGE}:${TIMESTAMP}" >> $GITHUB_OUTPUT
+          # 打印标签（调试用）
+          echo "生成的镜像标签：${BASE_IMAGE}:latest,${BASE_IMAGE}:${TIMESTAMP}"
+
+      # 步骤8：构建并推送多平台镜像
+      - name: 构建并推送镜像
+        uses: docker/build-push-action@v5
+        with:
+          context: .  # 构建上下文（当前目录）
+          file: ./Dockerfile  # Dockerfile路径
+          platforms: linux/amd64,linux/386,linux/arm64,linux/arm/v7,linux/arm/v6  # 多平台支持
+          push: true  # 启用推送
+          tags: ${{ steps.generate-tags.outputs.tags }}  # 使用步骤7生成的标签
+          cache-from: type=gha  # 缓存加速构建
+          cache-to: type=gha,mode=max
